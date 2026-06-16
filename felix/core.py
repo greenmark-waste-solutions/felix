@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import re
 import shutil
@@ -55,6 +56,13 @@ class BrandSafetyFinding:
     reference: str
 
 
+@dataclass(frozen=True)
+class PluginDoctorCheck:
+    name: str
+    ok: bool
+    detail: str
+
+
 BRAND_SAFETY_FORBIDDEN_REFERENCES = (
     "fix" + "-it",
     "fix" + " it",
@@ -67,6 +75,7 @@ BRAND_SAFETY_FORBIDDEN_REFERENCES = (
 )
 BRAND_SAFETY_IGNORED_PARTS = frozenset({".git", ".pytest_cache", ".ruff_cache", ".venv", "felix.egg-info", "__pycache__"})
 BRAND_SAFETY_TEXT_SUFFIXES = frozenset({"", ".md", ".py", ".toml", ".txt"})
+PLUGIN_REQUIRED_FILES = (".codex-plugin/plugin.json", "README.md", "LICENSE", "SECURITY.md")
 OVERLAP_STOPWORDS = frozenset(
     {
         "agent",
@@ -237,6 +246,105 @@ def render_brand_safety(root: Path | None = None) -> str:
         return "\n".join(lines)
     for finding in findings:
         lines.append(f"- {finding.path}: {finding.reference}")
+    return "\n".join(lines)
+
+
+def _codex_plugin_validator_path() -> Path:
+    return Path.home() / ".codex" / "skills" / ".system" / "plugin-creator" / "scripts" / "validate_plugin.py"
+
+
+def _skill_frontmatter(text: str) -> dict[str, str]:
+    if not text.startswith("---\n"):
+        return {}
+    end = text.find("\n---", 4)
+    if end == -1:
+        return {}
+    frontmatter: dict[str, str] = {}
+    for line in text[4:end].splitlines():
+        if ":" not in line:
+            continue
+        key, value = line.split(":", 1)
+        frontmatter[key.strip()] = value.strip()
+    return frontmatter
+
+
+def plugin_doctor_checks(plugin_root: Path) -> tuple[PluginDoctorCheck, ...]:
+    root = plugin_root.expanduser().resolve()
+    checks: list[PluginDoctorCheck] = [
+        PluginDoctorCheck("plugin_root", root.exists() and root.is_dir(), str(root)),
+    ]
+    if not root.exists() or not root.is_dir():
+        return tuple(checks)
+
+    for required_file in PLUGIN_REQUIRED_FILES:
+        path = root / required_file
+        checks.append(PluginDoctorCheck(f"required_file:{required_file}", path.is_file(), str(path)))
+
+    manifest_path = root / ".codex-plugin" / "plugin.json"
+    if manifest_path.is_file():
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            checks.append(PluginDoctorCheck("manifest_json", False, f"{manifest_path}: {exc}"))
+        else:
+            for field in ("name", "version", "description", "skills"):
+                checks.append(PluginDoctorCheck(f"manifest_field:{field}", bool(manifest.get(field)), str(manifest_path)))
+    else:
+        checks.append(PluginDoctorCheck("manifest_json", False, f"missing {manifest_path}"))
+
+    skill_files = tuple(sorted((root / "skills").glob("*/SKILL.md")))
+    checks.append(PluginDoctorCheck("skill_count", bool(skill_files), f"{len(skill_files)} skill(s)"))
+    for skill_file in skill_files:
+        frontmatter = _skill_frontmatter(skill_file.read_text(encoding="utf-8"))
+        checks.append(PluginDoctorCheck(f"skill_name:{skill_file.parent.name}", bool(frontmatter.get("name")), str(skill_file)))
+        checks.append(
+            PluginDoctorCheck(
+                f"skill_description:{skill_file.parent.name}",
+                bool(frontmatter.get("description")),
+                str(skill_file),
+            )
+        )
+
+    validator_path = _codex_plugin_validator_path()
+    if validator_path.is_file():
+        result = subprocess.run(
+            ["python3", str(validator_path), str(root)],
+            check=False,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+        )
+        checks.append(
+            PluginDoctorCheck(
+                "codex_plugin_validator",
+                result.returncode == 0,
+                result.stdout.strip() or f"exit {result.returncode}",
+            )
+        )
+    else:
+        checks.append(PluginDoctorCheck("codex_plugin_validator", True, f"skipped; not found at {validator_path}"))
+
+    brand_findings = audit_brand_safety(root)
+    checks.append(
+        PluginDoctorCheck(
+            "brand_safety",
+            not brand_findings,
+            "no protected-reference terms found"
+            if not brand_findings
+            else "; ".join(f"{finding.path}: {finding.reference}" for finding in brand_findings),
+        )
+    )
+    return tuple(checks)
+
+
+def render_plugin_doctor(plugin_root: Path) -> str:
+    checks = plugin_doctor_checks(plugin_root)
+    status = "PASS" if all(check.ok for check in checks) else "FAIL"
+    root = plugin_root.expanduser().resolve()
+    lines = [f"Felix plugin doctor: {status}", f"root: {root}", ""]
+    for check in checks:
+        marker = "ok" if check.ok else "fail"
+        lines.append(f"- {check.name}: {marker} ({check.detail})")
     return "\n".join(lines)
 
 

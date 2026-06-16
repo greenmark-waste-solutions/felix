@@ -8,8 +8,10 @@ from felix.core import (
     doctor,
     find_agent,
     list_agents,
+    plugin_doctor_checks,
     render_brand_safety,
     render_agent_interview,
+    render_plugin_doctor,
     render_scaffold_result,
     render_self_checks,
     roadmap,
@@ -228,3 +230,81 @@ def test_brand_safety_reports_findings(tmp_path):
     assert len(findings) == 1
     assert findings[0].path == risky_file
     assert "FAIL" in render_brand_safety(tmp_path)
+
+
+def write_plugin(root: Path, *, manifest: bool = True, skill_frontmatter: str | None = None) -> None:
+    (root / ".codex-plugin").mkdir(parents=True)
+    (root / "skills" / "use-demo").mkdir(parents=True)
+    if manifest:
+        (root / ".codex-plugin" / "plugin.json").write_text(
+            """
+{
+  "name": "demo-plugin",
+  "version": "0.1.0",
+  "description": "Demo plugin.",
+  "author": {"name": "Felix", "url": "https://example.com"},
+  "homepage": "https://example.com",
+  "repository": "https://example.com/repo",
+  "license": "MIT",
+  "skills": "./skills/",
+  "interface": {
+    "displayName": "Demo",
+    "shortDescription": "Demo plugin.",
+    "longDescription": "Demo plugin for Felix plugin doctor tests.",
+    "developerName": "Felix",
+    "category": "Developer Tools",
+    "capabilities": ["Demo"],
+    "websiteURL": "https://example.com",
+    "privacyPolicyURL": "https://example.com/privacy",
+    "termsOfServiceURL": "https://example.com/terms",
+    "defaultPrompt": ["Use Demo."]
+  }
+}
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+    for filename in ("README.md", "LICENSE", "SECURITY.md"):
+        (root / filename).write_text(f"# {filename}\n", encoding="utf-8")
+    frontmatter = skill_frontmatter
+    if frontmatter is None:
+        frontmatter = "---\nname: use-demo\ndescription: Use the demo plugin.\n---\n"
+    (root / "skills" / "use-demo" / "SKILL.md").write_text(frontmatter + "\n# Demo\n", encoding="utf-8")
+
+
+def test_plugin_doctor_passes_minimal_plugin(tmp_path: Path) -> None:
+    write_plugin(tmp_path)
+
+    output = render_plugin_doctor(tmp_path)
+
+    assert "Felix plugin doctor: PASS" in output
+    assert "required_file:.codex-plugin/plugin.json: ok" in output
+    assert "skill_description:use-demo: ok" in output
+    assert not any(not check.ok for check in plugin_doctor_checks(tmp_path))
+
+
+def test_plugin_doctor_fails_missing_manifest(tmp_path: Path) -> None:
+    write_plugin(tmp_path, manifest=False)
+
+    checks = plugin_doctor_checks(tmp_path)
+
+    assert any(check.name == "required_file:.codex-plugin/plugin.json" and not check.ok for check in checks)
+    assert "Felix plugin doctor: FAIL" in render_plugin_doctor(tmp_path)
+
+
+def test_plugin_doctor_fails_missing_required_file(tmp_path: Path) -> None:
+    write_plugin(tmp_path)
+    (tmp_path / "SECURITY.md").unlink()
+
+    checks = plugin_doctor_checks(tmp_path)
+
+    assert any(check.name == "required_file:SECURITY.md" and not check.ok for check in checks)
+
+
+def test_plugin_doctor_fails_invalid_skill_frontmatter(tmp_path: Path) -> None:
+    write_plugin(tmp_path, skill_frontmatter="# Missing frontmatter")
+
+    checks = plugin_doctor_checks(tmp_path)
+
+    assert any(check.name == "skill_name:use-demo" and not check.ok for check in checks)
+    assert any(check.name == "skill_description:use-demo" and not check.ok for check in checks)

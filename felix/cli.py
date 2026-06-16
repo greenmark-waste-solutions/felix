@@ -14,6 +14,7 @@ from .core import (
     find_agent,
     list_agents,
     render_agent_interview,
+    render_plugin_doctor,
     render_self_checks,
     roadmap,
     run_checks,
@@ -43,6 +44,11 @@ def build_parser() -> argparse.ArgumentParser:
     interview_parser = subparsers.add_parser("interview", help="run the pre-scaffold role-boundary interview")
     interview_parser.add_argument("name")
     interview_parser.add_argument("--purpose", default="", help="brief purpose to improve overlap checks")
+
+    plugin_parser = subparsers.add_parser("plugin", help="inspect and maintain Codex plugins")
+    plugin_sub = plugin_parser.add_subparsers(dest="plugin_command", required=True)
+    plugin_doctor_parser = plugin_sub.add_parser("doctor", help="check a Codex plugin package")
+    plugin_doctor_parser.add_argument("path", type=Path)
 
     agents_parser = subparsers.add_parser("agents", help="inspect known agents")
     agents_sub = agents_parser.add_subparsers(dest="agents_command", required=True)
@@ -105,6 +111,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "interview":
         print(render_agent_interview(args.name, purpose=args.purpose))
         return 0
+
+    if args.command == "plugin":
+        if args.plugin_command == "doctor":
+            output = render_plugin_doctor(args.path)
+            print(output)
+            return 1 if "Felix plugin doctor: FAIL" in output else 0
 
     if args.command == "agents":
         if args.agents_command == "list":
